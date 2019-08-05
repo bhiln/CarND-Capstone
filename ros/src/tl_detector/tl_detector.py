@@ -8,10 +8,10 @@ from sensor_msgs.msg import Image
 from cv_bridge import CvBridge
 from light_classification.tl_classifier import TLClassifier
 import tf
-import cv2
 import yaml
 from scipy.spatial import KDTree
 import numpy as np
+import cv2
 
 STATE_COUNT_THRESHOLD = 3
 
@@ -19,7 +19,11 @@ class TLDetector(object):
     def __init__(self):
         rospy.init_node('tl_detector')
 
-        self.no_camera = False
+        config_string = rospy.get_param("/traffic_light_config")
+        self.config = yaml.load(config_string)
+        self.is_site = self.config["is_site"]
+        
+        self.use_camera = self.is_site
         self.pose = None
         self.waypoints = None
         self.camera_image = None
@@ -40,17 +44,14 @@ class TLDetector(object):
         sub3 = rospy.Subscriber('/vehicle/traffic_lights', TrafficLightArray, self.traffic_cb, queue_size=2)
         
         sub6 = None
-        if not self.no_camera:
+        if self.use_camera:
             sub6 = rospy.Subscriber('/image_color', Image, self.image_cb, queue_size=1)
-
-        config_string = rospy.get_param("/traffic_light_config")
-        self.config = yaml.load(config_string)
-        self.is_site = self.config["is_site"]
 
         self.upcoming_red_light_pub = rospy.Publisher('/traffic_waypoint', Int32, queue_size=1)
 
         self.bridge = CvBridge()
-        self.light_classifier = TLClassifier()
+#         self.light_classifier = TLClassifier("frozen_inference_graph_sim_tf_v1.7.pb")
+        self.light_classifier = TLClassifier("frozen_inference_graph_real_tf_v1.7.pb")
         self.listener = tf.TransformListener()
 
         self.state = TrafficLight.UNKNOWN
@@ -59,11 +60,15 @@ class TLDetector(object):
         self.state_count = 0
         self.image_skip_count = 0
         
+        self.is_training = False
+        self.image_id = 0
+        self.image_name = "run0"
+        
         rospy.spin()
 
     def pose_cb(self, msg):
         self.pose = msg
-        if self.no_camera:
+        if not self.use_camera:
             self.image_cb(None)
 
     def waypoints_cb(self, waypoints):
@@ -134,8 +139,16 @@ class TLDetector(object):
         """
         state = light.state
         
-        if self.is_site:
-            if(not self.has_image):
+        if self.use_camera:
+            if self.is_training and self.has_image:
+                cv_image = self.bridge.imgmsg_to_cv2(self.camera_image, "bgr8")
+                image_filename = '%s_%s.png' % (self.image_name, self.image_id)
+                cv2.imwrite(image_filename,cv_image)
+                with open("%s_gt.txt" % self.image_name,"a") as f:
+                    f.write("%s,%s" % (image_filename, state))
+                self.image_id += 1
+
+            if not self.has_image:
                 self.prev_light_loc = None
                 return False
 
@@ -143,8 +156,7 @@ class TLDetector(object):
 
             #Get classification
             state = self.light_classifier.get_classification(cv_image)
-        
-        
+
         return state
 
     def process_traffic_lights(self):
